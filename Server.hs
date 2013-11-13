@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+import Protocol
 import Data.Integer.SAT
 import Data.Maybe(fromMaybe)
 import Control.Monad(guard)
@@ -6,7 +7,6 @@ import qualified Data.Map as Map
 import Data.Map(Map)
 import NetworkedGame.Server
 import Network(PortID)
-import Data.Binary
 
 getVal :: Prop -> Maybe Value
 getVal p = do sat <- checkSat (assert p noProps)
@@ -38,14 +38,6 @@ checkRule Model { .. } p =
 
 instance Show Model where
   show _ = "Model"
-
-data Answer = OK
-            | RejectedValid Value
-            | AcceptedInvalid Value
-              deriving (Read,Show)
-
-newtype Value  = V Integer
-              deriving (Show,Read,Eq)
 
 --------------------------------------------------------------------------------
 
@@ -175,12 +167,6 @@ resetPlayer Player { .. } =
 
 --------------------------------------------------------------------------------
 
-data Board = Board
-  { boardKnownGood  :: [Value]
-  , boardKnownBad   :: [Value]
-  , boardTheories   :: [ (Prop, Answer) ]
-  } deriving (Read,Show)
-
 newBoard :: Board
 newBoard = Board
   { boardKnownGood = []
@@ -231,9 +217,10 @@ netServer serverPort = serverMain NetworkServer { .. } newServerState
 
   onCommand hs c cmd w =
     case cmd of
-      Ask v -> case playerAsk v w of
-                 Nothing -> announceOne hs c No >> return w
-                 Just w1 -> announce hs (Update (serverBoard w1)) >> return w1
+      MoveAsk v ->
+        case playerAsk v w of
+          Nothing -> announceOne hs c InvalidRequest >> return w
+          Just w1 -> announce hs (Update (serverBoard w1)) >> return w1
 {-
       Guess v ->
         do announce hs (MakeGuessOn v)
@@ -242,29 +229,6 @@ netServer serverPort = serverMain NetworkServer { .. } newServerState
 data ProtocolState
   = ServerReady
   | ServerGuess Float [ConnectionId] [(ConnectionId,Bool)]
-
-
-
-data ClientReq = Ask Value
-               | Guess Value
-               | MakeGuess Bool
-               | TryProp Prop
-                 deriving (Read,Show)
-
-
-data ServerResp = No
-                | Update Board
-                | MakeGuessOn Value
-                 deriving (Read,Show)
-
-
-instance Binary ClientReq where
-  put = put . show
-  get = fmap read get
-
-instance Binary ServerResp where
-  put = put . show
-  get = fmap read get
 
 
 
