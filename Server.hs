@@ -4,6 +4,9 @@ import Data.Maybe(fromMaybe)
 import Control.Monad(guard)
 import qualified Data.Map as Map
 import Data.Map(Map)
+import NetworkedGame.Server
+import Network(PortID)
+import Data.Binary
 
 getVal :: Prop -> Maybe Value
 getVal p = do sat <- checkSat (assert p noProps)
@@ -39,10 +42,10 @@ instance Show Model where
 data Answer = OK
             | RejectedValid Value
             | AcceptedInvalid Value
-              deriving Show
+              deriving (Read,Show)
 
 newtype Value  = V Integer
-              deriving (Show,Eq)
+              deriving (Show,Read,Eq)
 
 --------------------------------------------------------------------------------
 
@@ -84,7 +87,7 @@ playerAsk :: Value -> ServerState -> Maybe ServerState
 playerAsk v s = do (_,s') <- addExample v s
                    return s'
 
-playerGuess :: Value -> [(PlayerId,Bool)] -> ServerState -> Maybe ServerState
+playerGuess :: Value -> [(ConnectionId,Bool)] -> ServerState -> Maybe ServerState
 playerGuess v guesses s =
   do (isOK, ServerState { .. }) <- addExample v s
      let checkGuess i p = case lookup i guesses of
@@ -94,7 +97,7 @@ playerGuess v guesses s =
      return ServerState { serverPlayers = players', .. }
 
 
-playerGuessRule :: PlayerId -> Prop -> ServerState -> Maybe ServerState
+playerGuessRule :: ConnectionId -> Prop -> ServerState -> Maybe ServerState
 playerGuessRule who p ServerState { .. } =
   do m <- serverModel
      guessedPlayer <- playerCanGuess =<< getPlayer who serverPlayers
@@ -119,41 +122,33 @@ playerGuessRule who p ServerState { .. } =
 
 --------------------------------------------------------------------------------
 
-data Players = Players
-  { playersMap    :: Map PlayerId Player
-  , playersNextId :: Integer
-  } deriving Show
+newtype Players = Players { playersMap :: Map ConnectionId Player }
+                  deriving Show
 
 newPlayers :: Players
-newPlayers = Players { playersMap = Map.empty, playersNextId = 0 }
+newPlayers = Players { playersMap = Map.empty }
 
-addPlayer :: Players -> (PlayerId, Players)
-addPlayer Players { .. } =
-  (newId, Players { playersMap    = Map.insert newId newPlayer playersMap
-                  , playersNextId = 1 + playersNextId })
-  where
-  newId = PlayerId playersNextId
+addPlayer :: ConnectionId -> Players -> Players
+addPlayer newId Players { .. } =
+                Players { playersMap = Map.insert newId newPlayer playersMap }
 
-dropPlayer :: PlayerId -> Players -> Players
+dropPlayer :: ConnectionId -> Players -> Players
 dropPlayer i Players { .. } =
              Players { playersMap = Map.delete i playersMap, .. }
 
-getPlayer :: PlayerId -> Players -> Maybe Player
+getPlayer :: ConnectionId -> Players -> Maybe Player
 getPlayer i Players { .. } = Map.lookup i playersMap
 
-setPlayer :: PlayerId -> Player -> Players -> Players
+setPlayer :: ConnectionId -> Player -> Players -> Players
 setPlayer i p Players { .. } =
               Players { playersMap = Map.adjust (\_ -> p) i playersMap, .. }
 
-updatePlayers :: (PlayerId -> Player -> Player) -> Players -> Players
+updatePlayers :: (ConnectionId -> Player -> Player) -> Players -> Players
 updatePlayers f Players { .. } =
                 Players { playersMap = Map.mapWithKey f playersMap, ..  }
 
 
 --------------------------------------------------------------------------------
-newtype PlayerId = PlayerId Integer
-                    deriving (Show,Eq,Ord)
-
 data Player = Player
   { playerGuessScore :: Integer
   , playerWins       :: Integer
@@ -184,7 +179,7 @@ data Board = Board
   { boardKnownGood  :: [Value]
   , boardKnownBad   :: [Value]
   , boardTheories   :: [ (Prop, Answer) ]
-  } deriving Show
+  } deriving (Read,Show)
 
 newBoard :: Board
 newBoard = Board
@@ -216,6 +211,60 @@ knownValue v Board { .. } = v `elem` boardKnownGood || v `elem` boardKnownBad
 isNewProp :: Prop -> Board -> Bool
 isNewProp p Board { .. } = all (accepts p) boardKnownGood &&
                            all (not . accepts p) boardKnownBad
+
+
+
+--------------------------------------------------------------------------------
+
+netServer :: PortID -> IO ()
+netServer serverPort = serverMain NetworkServer { .. } newServerState
+  where
+  eventsPerSecond = 100
+
+  onTick _ _ w = return w
+
+  onConnect _ c ServerState { .. } =
+            return ServerState { serverPlayers = addPlayer c serverPlayers, .. }
+
+  onDisconnect _ c ServerState { .. } =
+           return ServerState { serverPlayers = dropPlayer c serverPlayers, .. }
+
+  onCommand hs c cmd w =
+    case cmd of
+      Ask v -> case playerAsk v w of
+                 Nothing -> announceOne hs c No >> return w
+                 Just w1 -> announce hs (Update (serverBoard w1)) >> return w1
+{-
+      Guess v ->
+        do announce hs (MakeGuessOn v)
+-}
+
+data ProtocolState
+  = ServerReady
+  | ServerGuess Float [ConnectionId] [(ConnectionId,Bool)]
+
+
+
+data ClientReq = Ask Value
+               | Guess Value
+               | MakeGuess Bool
+               | TryProp Prop
+                 deriving (Read,Show)
+
+
+data ServerResp = No
+                | Update Board
+                | MakeGuessOn Value
+                 deriving (Read,Show)
+
+
+instance Binary ClientReq where
+  put = put . show
+  get = fmap read get
+
+instance Binary ServerResp where
+  put = put . show
+  get = fmap read get
 
 
 
