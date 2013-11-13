@@ -47,30 +47,38 @@ newtype Value  = V Integer
 --------------------------------------------------------------------------------
 
 data ServerState = ServerState
-  { serverModel   :: Model
+  { serverModel   :: Maybe Model
   , serverPlayers :: Players
   , serverBoard   :: Board
   } deriving Show
 
+newServerState :: ServerState
+newServerState = ServerState { serverBoard   = newBoard
+                             , serverPlayers = newPlayers
+                             , serverModel   = Nothing
+                             }
 
-newServerState :: Model -> Maybe ServerState
-newServerState serverModel@Model { .. } =
+newGame :: Model -> ServerState -> Maybe ServerState
+newGame m@Model { .. } ServerState { .. } =
   do good <- getVal trueProp
      bad  <- getVal (Not trueProp)
-     return ServerState { serverBoard = newBoard good bad
-                        , serverPlayers = newPlayers, .. }
+     return ServerState
+              { serverModel   = Just m
+              , serverBoard   = newBoard { boardKnownGood = [good]
+                                         , boardKnownBad = [bad] }
+              , serverPlayers = updatePlayers (\_ -> resetPlayer) serverPlayers
+              }
 
 addExample :: Value -> ServerState -> Maybe (Bool, ServerState)
 addExample v ServerState { .. } =
-  do guard $ not $ knownValue v serverBoard
+  do m <- serverModel
+     let isOK         = check m v
+         Board { .. } = serverBoard
+         serverBoard'
+           | isOK      = Board { boardKnownGood = v : boardKnownGood, .. }
+           | otherwise = Board { boardKnownBad  = v : boardKnownBad, .. }
+     guard $ not $ knownValue v serverBoard
      return (isOK, ServerState { serverBoard = serverBoard', .. })
-  where
-  isOK         = check serverModel v
-  Board { .. } = serverBoard
-  serverBoard'
-    | isOK      = Board { boardKnownGood = v : boardKnownGood, .. }
-    | otherwise = Board { boardKnownBad  = v : boardKnownBad, .. }
-
 
 playerAsk :: Value -> ServerState -> Maybe ServerState
 playerAsk v s = do (_,s') <- addExample v s
@@ -88,13 +96,22 @@ playerGuess v guesses s =
 
 playerGuessRule :: PlayerId -> Prop -> ServerState -> Maybe ServerState
 playerGuessRule who p ServerState { .. } =
-  do guessedPlayer <- playerCanGuess =<< getPlayer who serverPlayers
-     let serverPlayers' = setPlayer who guessedPlayer serverPlayers
+  do m <- serverModel
+     guessedPlayer <- playerCanGuess =<< getPlayer who serverPlayers
      guard $ isNewProp p serverBoard
-     serverBoard' <- addTheory p (checkRule serverModel p) serverBoard
-     return ServerState { serverBoard = serverBoard'
-                        , serverPlayers = serverPlayers', .. }
-
+     let serverBoard' = addTheory p (checkRule m p) serverBoard
+     return $
+       if boardFinished serverBoard'
+          then ServerState
+                 { serverBoard    = serverBoard'
+                 , serverModel    = Nothing
+                 , serverPlayers  = setPlayer who (addWin guessedPlayer)
+                                                              serverPlayers }
+          else ServerState
+                 { serverBoard    = serverBoard'
+                 , serverPlayers  = setPlayer who guessedPlayer serverPlayers
+                 , ..
+                 }
 
 
 
@@ -156,6 +173,10 @@ playerCanGuess Player { .. } =
   do guard (playerGuessScore > 0)
      return Player { playerGuessScore = playerGuessScore - 1, .. }
 
+resetPlayer :: Player -> Player
+resetPlayer Player { .. } =
+            Player { playerGuessScore = 0, .. }
+
 
 --------------------------------------------------------------------------------
 
@@ -165,16 +186,21 @@ data Board = Board
   , boardTheories   :: [ (Prop, Answer) ]
   } deriving Show
 
-newBoard :: Value -> Value -> Board
-newBoard good bad = Board
-  { boardKnownGood = [good]
-  , boardKnownBad  = [bad]
+newBoard :: Board
+newBoard = Board
+  { boardKnownGood = []
+  , boardKnownBad  = []
   , boardTheories  = []
   }
 
-addTheory :: Prop -> Answer -> Board -> Maybe Board
-addTheory _ OK _ = Nothing
-addTheory p a Board { .. } = Just
+boardFinished :: Board -> Bool
+boardFinished Board { .. } =
+  case boardTheories of
+    (_,OK) : _ -> True
+    _          -> False
+
+addTheory :: Prop -> Answer -> Board -> Board
+addTheory p a Board { .. } =
   Board { boardTheories  = (p,a) : boardTheories
         , boardKnownGood = newGood ++ boardKnownGood
         , boardKnownBad  = newBad  ++ boardKnownBad
@@ -182,7 +208,7 @@ addTheory p a Board { .. } = Just
   where (newGood, newBad) = case a of
                               AcceptedInvalid v -> ([],[v])
                               RejectedValid   v -> ([v],[])
-                              OK -> error "Can't happen"
+                              OK                -> ([],[])
 
 knownValue :: Value -> Board -> Bool
 knownValue v Board { .. } = v `elem` boardKnownGood || v `elem` boardKnownBad
