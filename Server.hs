@@ -288,11 +288,12 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
 
 
   doGuess hs val done s =
-    do announce hs GuessingDone
-       s1 <- case playerGuess val (Map.toList done) s of
+    do s1 <- case playerGuess val (Map.toList done) s of
                Just s1 -> do announce hs (Update (serverBoard s1))
                              return s1
                Nothing -> return s
+       forM_ (getPlayers s1) $ \(c1,p) ->
+          announceOne hs c1 $ GuessingDone $ playerGuessScore p
        return (Ready, s1)
 
 
