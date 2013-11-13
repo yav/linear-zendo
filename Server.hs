@@ -2,9 +2,8 @@
 import Data.Integer.SAT
 import Data.Maybe(fromMaybe)
 import Control.Monad(guard)
-import System.IO(hFlush,stdout)
-import Text.Read(readMaybe)
-import Text.Show.Pretty(ppShow)
+import qualified Data.Map as Map
+import Data.Map(Map)
 
 getVal :: Prop -> Maybe Value
 getVal p = do sat <- checkSat (assert p noProps)
@@ -58,12 +57,8 @@ newServerState :: Model -> Maybe ServerState
 newServerState serverModel@Model { .. } =
   do good <- getVal trueProp
      bad  <- getVal (Not trueProp)
-     let (_,serverPlayers) = newPlayers
-     return ServerState { serverBoard = newBoard good bad, .. }
-
-nextTurn :: ServerState -> ServerState
-nextTurn ServerState { .. } =
-         ServerState { serverPlayers = nextPlayer serverPlayers, .. }
+     return ServerState { serverBoard = newBoard good bad
+                        , serverPlayers = newPlayers, .. }
 
 addExample :: Value -> ServerState -> Maybe (Bool, ServerState)
 addExample v ServerState { .. } =
@@ -79,28 +74,26 @@ addExample v ServerState { .. } =
 
 playerAsk :: Value -> ServerState -> Maybe ServerState
 playerAsk v s = do (_,s') <- addExample v s
-                   return $ nextTurn s'
+                   return s'
 
 playerGuess :: Value -> [(PlayerId,Bool)] -> ServerState -> Maybe ServerState
 playerGuess v guesses s =
   do (isOK, ServerState { .. }) <- addExample v s
-     let checkGuess p = case lookup (playerId p) guesses of
-                          Just ans | ans == isOK -> addGuessPoint p
-                          _                      -> p
-     let players' = updatePlayers checkGuess serverPlayers
-     return $ nextTurn ServerState { serverPlayers = players', .. }
+     let checkGuess i p = case lookup i guesses of
+                            Just ans | ans == isOK -> addGuessPoint p
+                            _                      -> p
+         players' = updatePlayers checkGuess serverPlayers
+     return ServerState { serverPlayers = players', .. }
 
 
-playerGuessRule :: Prop -> ServerState -> Maybe ServerState
-playerGuessRule p ServerState { .. } =
-  do let Players { .. } = serverPlayers
-     guessedPlayer <- playerCanGuess playersCur
+playerGuessRule :: PlayerId -> Prop -> ServerState -> Maybe ServerState
+playerGuessRule who p ServerState { .. } =
+  do guessedPlayer <- playerCanGuess =<< getPlayer who serverPlayers
+     let serverPlayers' = setPlayer who guessedPlayer serverPlayers
      guard $ isNewProp p serverBoard
-     let serverPlayers' = Players { playersCur = guessedPlayer, .. }
      serverBoard' <- addTheory p (checkRule serverModel p) serverBoard
-     return $ nextTurn $ ServerState { serverBoard = serverBoard'
-                                     , serverPlayers = serverPlayers'
-                                     , .. }
+     return ServerState { serverBoard = serverBoard'
+                        , serverPlayers = serverPlayers', .. }
 
 
 
@@ -110,86 +103,47 @@ playerGuessRule p ServerState { .. } =
 --------------------------------------------------------------------------------
 
 data Players = Players
-  { playersPrev   :: [Player]
-  , playersCur    :: Player
-  , playersNext   :: [Player]
+  { playersMap    :: Map PlayerId Player
   , playersNextId :: Integer
   } deriving Show
 
-newPlayers :: (Player, Players)
-newPlayers = (p, Players { playersPrev   = []
-                         , playersCur    = p
-                         , playersNext   = []
-                         , playersNextId = 1
-                         })
-  where p = newPlayer (PlayerId 0)
+newPlayers :: Players
+newPlayers = Players { playersMap = Map.empty, playersNextId = 0 }
 
-addPlayer :: Players -> (Player, Players)
-addPlayer Players { .. } = (p, Players { playersPrev   = p : playersPrev
-                                       , playersNextId = 1 + playersNextId
-                                       , .. })
+addPlayer :: Players -> (PlayerId, Players)
+addPlayer Players { .. } =
+  (newId, Players { playersMap    = Map.insert newId newPlayer playersMap
+                  , playersNextId = 1 + playersNextId })
   where
-  p = newPlayer (PlayerId playersNextId)
+  newId = PlayerId playersNextId
 
-dropPlayer :: PlayerId -> Players -> Maybe Players
-dropPlayer i Players { .. }
-  | playerId playersCur == i
-    = case playersNext of
-        p : ps -> Just Players { playersCur = p, playersNext = ps, .. }
-        [] -> case reverse playersPrev of
-                p : ps -> Just Players { playersCur = p, playersNext = ps
-                                       , playersPrev = [], .. }
-                [] -> Nothing
-  | otherwise = Just $ case dropFromList playersPrev of
-                         Just ps -> Players { playersPrev = ps, .. }
-                         Nothing ->
-                           case dropFromList playersNext of
-                             Just ps -> Players { playersNext = ps, .. }
-                             Nothing -> Players { .. }
+dropPlayer :: PlayerId -> Players -> Players
+dropPlayer i Players { .. } =
+             Players { playersMap = Map.delete i playersMap, .. }
 
-  where
-  dropFromList [] = Nothing
-  dropFromList (Player { .. } : ps)
-    | playerId == i = Just ps
-    | otherwise     = fmap (Player { .. } :) (dropFromList ps)
+getPlayer :: PlayerId -> Players -> Maybe Player
+getPlayer i Players { .. } = Map.lookup i playersMap
 
+setPlayer :: PlayerId -> Player -> Players -> Players
+setPlayer i p Players { .. } =
+              Players { playersMap = Map.adjust (\_ -> p) i playersMap, .. }
 
-nextPlayer :: Players -> Players
-nextPlayer Players { .. } =
-  case playersNext of
-    p : ps -> Players { playersPrev = playersCur : playersPrev
-                      , playersCur  = p
-                      , playersNext = ps
-                      , ..
-                      }
-    [] -> case reverse playersPrev of
-            p : ps -> Players { playersPrev = []
-                              , playersCur  = p
-                              , playersNext = ps
-                              , ..
-                              }
-            []     -> Players { .. }
-
-updatePlayers :: (Player -> Player) -> Players -> Players
-updatePlayers f Players { .. } = Players { playersPrev = map f playersPrev
-                                         , playersCur  = f playersCur
-                                         , playersNext = map f playersNext
-                                         , ..
-                                         }
+updatePlayers :: (PlayerId -> Player -> Player) -> Players -> Players
+updatePlayers f Players { .. } =
+                Players { playersMap = Map.mapWithKey f playersMap, ..  }
 
 
 --------------------------------------------------------------------------------
 newtype PlayerId = PlayerId Integer
-                    deriving (Show,Eq)
+                    deriving (Show,Eq,Ord)
 
 data Player = Player
-  { playerId         :: PlayerId
-  , playerGuessScore :: Integer
+  { playerGuessScore :: Integer
   , playerWins       :: Integer
   } deriving Show
 
-newPlayer :: PlayerId -> Player
-newPlayer playerId = Player { playerGuessScore = 0, playerWins = 0, .. }
+newPlayer :: Player
+newPlayer = Player { playerGuessScore = 0, playerWins = 0 }
 
 addGuessPoint :: Player -> Player
 addGuessPoint Player { .. } = Player { playerGuessScore = playerGuessScore + 1
@@ -237,28 +191,6 @@ isNewProp :: Prop -> Board -> Bool
 isNewProp p Board { .. } = all (accepts p) boardKnownGood &&
                            all (not . accepts p) boardKnownBad
 
-
-
-
---------------------------------------------------------------------------------
-
-example :: IO ()
-example = go initSt
-  where
-  model = Model { trueProp = Mod (Var (toName 0)) 7 :== K 0 }
-
-  Just initSt = newServerState model
-
-  go st = do putStrLn $ ppShow st
-             putStr "> "
-             hFlush stdout
-             xs <- getLine
-             case readMaybe xs of
-               Nothing -> putStrLn "Bad input" >> go st
-               Just n  -> 
-                case playerGuessRule n st of
-                  Just st1 -> go st1
-                  Nothing  -> putStrLn "You win"
 
 
 
