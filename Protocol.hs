@@ -34,7 +34,9 @@ data ClientReq
 data ServerResp
   = Update Board                -- ^ Current state of the board
   | NeedGuess Value             -- ^ Ask the client to submit a guess
-  | GuessTimeRemaining Integer  -- ^ This much time remains ot guess
+  | GuessTimeRemaining Float    -- ^ This much time remains ot guess
+  | GuessingDone                -- ^ Guessing round ended
+  | EndGame Bool Integer        -- ^ Game ended, bool is if you won, curr. score
   | InvalidRequest              -- ^ The client request was not OK
     deriving (Read,Show)
 
