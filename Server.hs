@@ -6,25 +6,32 @@ import System.IO(hFlush,stdout)
 import Text.Read(readMaybe)
 import Text.Show.Pretty(ppShow)
 
+getVal :: Prop -> Maybe Value
+getVal p = do sat <- checkSat (assert p noProps)
+              return $ V $ fromMaybe 0 $ lookup 0 sat
 
-data Model = Model
-  { trueProp  :: Prop
-  }
-
-check :: Model -> Value -> Bool
-check Model { .. } (V x) =
-  case checkSat $ assert (Var (toName 0) :== K x) $ assert trueProp noProps of
+accepts :: Prop -> Value -> Bool
+accepts p (V x) =
+  case checkSat $ assert p $ assert (Var (toName 0) :== K x) noProps of
     Just _  -> True
     Nothing -> False
 
+--------------------------------------------------------------------------------
+
+newtype Model = Model { trueProp  :: Prop }
+
+check :: Model -> Value -> Bool
+check Model { .. } x = accepts trueProp x
+
 checkRule :: Model -> Prop -> Answer
 checkRule Model { .. } p =
-  case checkSat $ assert trueProp $ assert (Not p) noProps of
-    Just sat -> RejectedValid $ V $ fromMaybe 0 $ lookup 0 sat
+  case getVal (trueProp :&& Not p) of
+    Just v -> RejectedValid v
     Nothing  ->
-      case checkSat $ assert (Not trueProp) $ assert p noProps of
-        Just sat -> AcceptedInvalid $ V $ fromMaybe 0 $ lookup 0 sat
+      case getVal (Not trueProp :&& p) of
+        Just v   -> AcceptedInvalid v
         Nothing  -> OK
+
 
 
 instance Show Model where
@@ -35,8 +42,8 @@ data Answer = OK
             | AcceptedInvalid Value
               deriving Show
 
-data Value  = V Integer
-              deriving Show
+newtype Value  = V Integer
+              deriving (Show,Eq)
 
 --------------------------------------------------------------------------------
 
@@ -47,12 +54,58 @@ data ServerState = ServerState
   } deriving Show
 
 
-newServerState :: Model -> Value -> Value -> Maybe ServerState
-newServerState serverModel goodExample badExample =
-  do guard (check serverModel goodExample)
-     guard (not (check serverModel badExample))
+newServerState :: Model -> Maybe ServerState
+newServerState serverModel@Model { .. } =
+  do good <- getVal trueProp
+     bad  <- getVal (Not trueProp)
      let (_,serverPlayers) = newPlayers
-     return ServerState { serverBoard = newBoard goodExample badExample, .. }
+     return ServerState { serverBoard = newBoard good bad, .. }
+
+nextTurn :: ServerState -> ServerState
+nextTurn ServerState { .. } =
+         ServerState { serverPlayers = nextPlayer serverPlayers, .. }
+
+addExample :: Value -> ServerState -> Maybe (Bool, ServerState)
+addExample v ServerState { .. } =
+  do guard $ not $ knownValue v serverBoard
+     return (isOK, ServerState { serverBoard = serverBoard', .. })
+  where
+  isOK         = check serverModel v
+  Board { .. } = serverBoard
+  serverBoard'
+    | isOK      = Board { boardKnownGood = v : boardKnownGood, .. }
+    | otherwise = Board { boardKnownBad  = v : boardKnownBad, .. }
+
+
+playerAsk :: Value -> ServerState -> Maybe ServerState
+playerAsk v s = do (_,s') <- addExample v s
+                   return $ nextTurn s'
+
+playerGuess :: Value -> [(PlayerId,Bool)] -> ServerState -> Maybe ServerState
+playerGuess v guesses s =
+  do (isOK, ServerState { .. }) <- addExample v s
+     let checkGuess p = case lookup (playerId p) guesses of
+                          Just ans | ans == isOK -> addGuessPoint p
+                          _                      -> p
+     let players' = updatePlayers checkGuess serverPlayers
+     return $ nextTurn ServerState { serverPlayers = players', .. }
+
+
+playerGuessRule :: Prop -> ServerState -> Maybe ServerState
+playerGuessRule p ServerState { .. } =
+  do let Players { .. } = serverPlayers
+     guessedPlayer <- playerCanGuess playersCur
+     guard $ isNewProp p serverBoard
+     let serverPlayers' = Players { playersCur = guessedPlayer, .. }
+     serverBoard' <- addTheory p (checkRule serverModel p) serverBoard
+     return $ nextTurn $ ServerState { serverBoard = serverBoard'
+                                     , serverPlayers = serverPlayers'
+                                     , .. }
+
+
+
+
+
 
 --------------------------------------------------------------------------------
 
@@ -69,16 +122,16 @@ newPlayers = (p, Players { playersPrev   = []
                          , playersNext   = []
                          , playersNextId = 1
                          })
-  where p = newPlayer 0
+  where p = newPlayer (PlayerId 0)
 
 addPlayer :: Players -> (Player, Players)
 addPlayer Players { .. } = (p, Players { playersPrev   = p : playersPrev
                                        , playersNextId = 1 + playersNextId
                                        , .. })
   where
-  p = newPlayer playersNextId
+  p = newPlayer (PlayerId playersNextId)
 
-dropPlayer :: Integer -> Players -> Maybe Players
+dropPlayer :: PlayerId -> Players -> Maybe Players
 dropPlayer i Players { .. }
   | playerId playersCur == i
     = case playersNext of
@@ -126,13 +179,16 @@ updatePlayers f Players { .. } = Players { playersPrev = map f playersPrev
 
 
 --------------------------------------------------------------------------------
+newtype PlayerId = PlayerId Integer
+                    deriving (Show,Eq)
+
 data Player = Player
-  { playerId         :: Integer
+  { playerId         :: PlayerId
   , playerGuessScore :: Integer
   , playerWins       :: Integer
   } deriving Show
 
-newPlayer :: Integer -> Player
+newPlayer :: PlayerId -> Player
 newPlayer playerId = Player { playerGuessScore = 0, playerWins = 0, .. }
 
 addGuessPoint :: Player -> Player
@@ -140,6 +196,11 @@ addGuessPoint Player { .. } = Player { playerGuessScore = playerGuessScore + 1
                                      , .. }
 addWin :: Player -> Player
 addWin Player { .. } = Player { playerWins = playerWins + 1, .. }
+
+playerCanGuess :: Player -> Maybe Player
+playerCanGuess Player { .. } =
+  do guard (playerGuessScore > 0)
+     return Player { playerGuessScore = playerGuessScore - 1, .. }
 
 
 --------------------------------------------------------------------------------
@@ -157,18 +218,8 @@ newBoard good bad = Board
   , boardTheories  = []
   }
 
-addExample :: Value -> ServerState -> (Bool, ServerState)
-addExample v ServerState { .. } =
-  (isOK, ServerState { serverBoard = serverBoard', .. })
-  where
-  isOK         = check serverModel v
-  Board { .. } = serverBoard
-  serverBoard'
-    | isOK      = Board { boardKnownGood = v : boardKnownGood, .. }
-    | otherwise = Board { boardKnownBad  = v : boardKnownBad, .. }
-
 addTheory :: Prop -> Answer -> Board -> Maybe Board
-addTheory p OK _ = Nothing
+addTheory _ OK _ = Nothing
 addTheory p a Board { .. } = Just
   Board { boardTheories  = (p,a) : boardTheories
         , boardKnownGood = newGood ++ boardKnownGood
@@ -179,45 +230,24 @@ addTheory p a Board { .. } = Just
                               RejectedValid   v -> ([v],[])
                               OK -> error "Can't happen"
 
-nextTurn :: ServerState -> ServerState
-nextTurn ServerState { .. } =
-         ServerState { serverPlayers = nextPlayer serverPlayers, .. }
+knownValue :: Value -> Board -> Bool
+knownValue v Board { .. } = v `elem` boardKnownGood || v `elem` boardKnownBad
 
-
-
-playerAsk :: Value -> ServerState -> ServerState
-playerAsk v = nextTurn . snd . addExample v
-
-playerGuess :: Value -> [(Integer,Bool)] -> ServerState -> ServerState
-playerGuess v guesses s =
-  nextTurn
-    ServerState { serverPlayers = updatePlayers checkGuess serverPlayers
-                , .. }
-  where
-  (isOK, ServerState { .. }) = addExample v s
-
-  checkGuess p = case lookup (playerId p) guesses of
-                   Just ans | ans == isOK -> addGuessPoint p
-                   _                      -> p
-
-
-playerGuessRule :: Prop -> ServerState -> Maybe ServerState
-playerGuessRule p ServerState { .. } =
-  do serverBoard' <- addTheory p (checkRule serverModel p) serverBoard
-     return $ nextTurn $ ServerState { serverBoard = serverBoard', .. }
+isNewProp :: Prop -> Board -> Bool
+isNewProp p Board { .. } = all (accepts p) boardKnownGood &&
+                           all (not . accepts p) boardKnownBad
 
 
 
 
 --------------------------------------------------------------------------------
 
+example :: IO ()
 example = go initSt
   where
-  good  = V 0
-  bad   = V (-100)
   model = Model { trueProp = Mod (Var (toName 0)) 7 :== K 0 }
 
-  Just initSt = newServerState model good bad
+  Just initSt = newServerState model
 
   go st = do putStrLn $ ppShow st
              putStr "> "
