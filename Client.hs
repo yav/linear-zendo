@@ -1,7 +1,6 @@
 {-# LANGUAGE PatternGuards #-}
 module Main where
 
-
 import Data.List
 import Data.Char (isDigit, isSymbol)
 
@@ -16,6 +15,7 @@ import Control.Monad.State
 import Data.Maybe
 import Text.Read (readMaybe)
 
+import Prop
 import Protocol
 import NetworkedGame.Packet
 import Network (connectTo, PortID(..))
@@ -125,10 +125,14 @@ inputLoop :: GameState -> IO ()
 inputLoop g = do
   let parsedXs = cleanTrailing (selectedLine g) (matchLanguage [(0,propLanguage)] (propLines g))
   let xs' = map (view _4) parsedXs -- insert empty end-lines
+  let fakeProp = Var (toName 1) :== Var (toName 2)
+  let (curProp,goodProp) = case runParse xs' of
+                             Just p  -> (p,True)
+                             Nothing -> (fakeProp,False)
   update (gameVty g) (pic_for_image $
               messageImage (gameMessage g)
           <-> pointsImage (guessScore g)
-          <-> boardImage (gameBoard g)
+          <-> boardImage curProp (gameBoard g)
           <-> string def_attr " "
           <-> questionImage (gameQuestion g)
           <-> string def_attr " "
@@ -140,13 +144,13 @@ inputLoop g = do
     Event (EvKey KEsc _) -> return ()
 
     Event (EvKey (KASCII 'p') [MCtrl])
-      | Just p <- runParse xs' ->
-      do say (gameHandle g) (MoveProp p)
+      | goodProp ->
+      do say (gameHandle g) (MoveProp curProp)
          inputLoop g { propLines = xs' }
 
     Event (EvKey (KASCII 'h') [MCtrl])
-      | Just p <- runParse xs' ->
-      do say (gameHandle g) (NewGame p)
+      | goodProp ->
+      do say (gameHandle g) (NewGame curProp)
          inputLoop g { propLines = xs' }
 
     Event (EvKey (KASCII 'a') [MCtrl])
@@ -321,14 +325,26 @@ messageImage :: String -> Image
 messageImage msg = string foregray "Server message: "
                <|> string def_attr msg
 
-boardImage :: Board -> Image
-boardImage board
-  =   string (with_fore_color def_attr blue) "Good examples: "
-       <|> string def_attr (intercalate ", " (map (show . unvalue) (boardKnownGood board)))
-  <-> string (with_fore_color def_attr red) "Bad examples: "
-       <|> string def_attr (intercalate ", " (map (show . unvalue) (boardKnownBad board)))
+commaImg :: Image
+commaImg = string def_attr ", "
+
+boardImage :: Prop -> Board -> Image
+boardImage prop board
+  =   string (with_fore_color def_attr blue) "Good examples: " <|>
+      horiz_cat (intersperse commaImg (map (showExample prop) (boardKnownGood board)))
+  <-> string (with_fore_color def_attr blue) "Bad examples: " <|>
+      horiz_cat (intersperse commaImg (map (showExample prop) (boardKnownBad board)))
   <-> string (with_fore_color def_attr green) "Theories:"
   <-> string def_attr "   " <|> vert_cat (map (uncurry theoryImage) (boardTheories board))
+
+showExample :: Prop -> Value -> Image
+showExample prop val = string (with_fore_color def_attr color) (show (unvalue val))
+  where color = case acceptsMaybe prop val of
+                  Just True  -> green
+                  Just False -> red
+                  Nothing    -> Color240 213
+
+
 
 theoryImage prop answer = string def_attr (answerStr ++ " <- " ++ showExprPrec 0 (propToTree prop) "")
   where
@@ -383,6 +399,7 @@ instance Parsable Prop where
       "true" -> return PTrue
       "false" -> return PFalse
       "not" -> liftM Not parse
+      _     -> mzero
 
 instance Parsable Expr where
   parse = do
@@ -397,6 +414,7 @@ instance Parsable Expr where
       "negate" -> liftM Negate parse
       "if" -> liftM3 If parse parse parse
       "x" -> return (Var (toName 0))
+      _ -> mzero
 
 propToTree PTrue  = Node "true"  []
 propToTree PFalse = Node "false" []
@@ -418,3 +436,6 @@ exprToTree (x :* y) = Node "*" [exprToTree (K x), exprToTree y]
 exprToTree (Div x y) = Node "/" [exprToTree x, exprToTree (K y)]
 exprToTree (Mod x y) = Node "%" [exprToTree x, exprToTree (K y)]
 exprToTree (Negate x) = Node "negate" [exprToTree x]
+
+
+

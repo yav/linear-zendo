@@ -1,5 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
 import Protocol
+import Prop
 import Data.Integer.SAT
 import Data.List(delete)
 import Data.Maybe(fromMaybe)
@@ -9,17 +10,6 @@ import Data.Map(Map)
 import NetworkedGame.Server
 import Network(PortID(..))
 
-getVal :: Prop -> Maybe Value
-getVal p = do sat <- checkSat (assert p noProps)
-              return $ V $ fromMaybe 0 $ lookup 0 sat
-
-accepts :: Prop -> Value -> Bool
-accepts p (V x) =
-  case checkSat $ assert p $ assert (Var (toName 0) :== K x) noProps of
-    Just _  -> True
-    Nothing -> False
-
---------------------------------------------------------------------------------
 
 newtype Model = Model { trueProp  :: Prop }
 
