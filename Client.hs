@@ -328,6 +328,7 @@ theoryImage prop answer = string def_attr (answerStr ++ " <- " ++ showExprPrec 0
   answerStr = case answer of
                 RejectedValid (V v) -> "rejected " ++ show v
                 AcceptedInvalid (V v) -> "accepted " ++ show v
+                OK                    -> "correct!"
 
 questionImage :: Maybe Value -> Image
 questionImage Nothing = string foregray "No question pending"
