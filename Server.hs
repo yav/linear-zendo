@@ -232,19 +232,21 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
     | otherwise = doGuess hs val done s
 
   onConnect hs c (r,ServerState { .. }) =
-    do announceOne hs c (Update serverBoard)
+    do announceOne hs c (Update serverBoard 0)
        return (r, ServerState { serverPlayers = addPlayer c serverPlayers, .. })
 
   onDisconnect _ c (r,ServerState { .. }) =
       return (r,ServerState { serverPlayers = dropPlayer c serverPlayers, .. })
 
-  onCommand hs c cmd w@(Ready,s) =
+  onCommand hs c cmd w@(Ready,s) = do
+    print cmd
     case cmd of
 
       MoveAsk v ->
         case playerAsk v s of
           Nothing -> announceOne hs c InvalidRequest >> return w
-          Just w1 -> announce hs (Update (serverBoard w1)) >> return (Ready,w1)
+          Just w1 -> do doUpdate hs w1
+                        return (Ready,w1)
 
       MoveGuess v ->
         do announce hs (NeedGuess v)
@@ -257,9 +259,10 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
           Nothing -> do announceOne hs c InvalidRequest
                         return w
           Just s1 ->
-            do when (boardFinished (serverBoard s1)) $
-                 forM_ (getPlayers s1) $ \(c1,p) ->
-                   announceOne hs c1 $ EndGame (c == c1) $ playerWins p
+            do if boardFinished (serverBoard s1)
+                 then forM_ (getPlayers s1) $ \(c1,p) ->
+                        announceOne hs c1 $ EndGame (c == c1) $ playerWins p
+                 else doUpdate hs s1
 
                return (Ready, s1)
 
@@ -268,7 +271,7 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
 
       NewGame p ->
         case newGame (Model p) s of
-          Just s1 -> do announce hs (Update $ serverBoard s1)
+          Just s1 -> do doUpdate hs s1
                         return (Ready, s1)
           Nothing -> do announceOne hs c InvalidRequest
                         return w
@@ -289,11 +292,12 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
 
   doGuess hs val done s =
     do s1 <- case playerGuess val (Map.toList done) s of
-               Just s1 -> do announce hs (Update (serverBoard s1))
+               Just s1 -> do doUpdate hs s1
                              return s1
                Nothing -> return s
-       forM_ (getPlayers s1) $ \(c1,p) ->
-          announceOne hs c1 $ GuessingDone $ playerGuessScore p
+       announce hs GuessingDone
        return (Ready, s1)
 
-
+  doUpdate hs s =
+       forM_ (getPlayers s) $ \(c,p) ->
+          announceOne hs c $ Update (serverBoard s) $ playerGuessScore p
