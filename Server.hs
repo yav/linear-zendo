@@ -7,7 +7,7 @@ import Control.Monad(guard,when,forM_)
 import qualified Data.Map as Map
 import Data.Map(Map)
 import NetworkedGame.Server
-import Network(PortID)
+import Network(PortID(..))
 
 getVal :: Prop -> Maybe Value
 getVal p = do sat <- checkSat (assert p noProps)
@@ -216,6 +216,8 @@ data ServerStatus
   | GuessRound Float Value [ConnectionId] (Map ConnectionId Bool)
 
 
+main :: IO ()
+main = netServer (PortNumber 16000)
 
 
 netServer :: PortID -> IO ()
@@ -259,11 +261,10 @@ netServer serverPort = serverMain NetworkServer { .. } (Ready, newServerState)
           Nothing -> do announceOne hs c InvalidRequest
                         return w
           Just s1 ->
-            do if boardFinished (serverBoard s1)
-                 then forM_ (getPlayers s1) $ \(c1,p) ->
-                        announceOne hs c1 $ EndGame (c == c1) $ playerWins p
-                 else doUpdate hs s1
-
+            do when (boardFinished (serverBoard s1)) $
+                 forM_ (getPlayers s1) $ \(c1,p) ->
+                   announceOne hs c1 $ EndGame (c == c1) $ playerWins p
+               doUpdate hs s1
                return (Ready, s1)
 
       SubmitGuess {} -> do announceOne hs c InvalidRequest
