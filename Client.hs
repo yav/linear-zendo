@@ -20,6 +20,7 @@ import Protocol
 import NetworkedGame.Packet
 import Network (connectTo, PortID(..))
 import System.IO
+import System.Environment
 
 data Language = Language String [Constructor]
 
@@ -93,11 +94,17 @@ data GameState = GameState
   , gameMessage :: String
   }
 
+processArgs = do
+  args <- getArgs
+  case args of
+    [h] -> return h
+    _   -> fail "Please specify hostname on command line"
+
 main = do
+  host <- processArgs
   events <- newChan
   let board = Board [] [] []
-  h <- connectTo "127.0.0.1" (PortNumber 16000)
-  say h (NewGame (Mod (Var (toName 0)) 7 :== K 0))
+  h <- connectTo host (PortNumber 16000)
   bracket mkVty shutdown $ \vty ->
     do inputThread <- forkIO (forever (writeChan events . Event =<< next_event vty))
        serverThread <- forkIO (forever (writeChan events . ServerEvent =<< hGetPacketed h))
